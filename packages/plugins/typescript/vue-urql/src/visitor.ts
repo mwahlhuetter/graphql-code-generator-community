@@ -13,6 +13,7 @@ import { VueUrqlRawPluginConfig } from './config.js';
 
 export interface UrqlPluginConfig extends ClientSideBasePluginConfig {
   withComposition: boolean;
+  withAsyncComposition: boolean;
   urqlImportFrom: string;
 }
 
@@ -26,6 +27,7 @@ export class UrqlVisitor extends ClientSideBaseVisitor<VueUrqlRawPluginConfig, U
   ) {
     super(schema, fragments, rawConfig, {
       withComposition: getConfigValue(rawConfig.withComposition, true),
+      withAsyncComposition: getConfigValue(rawConfig.withAsyncComposition, false),
       urqlImportFrom: getConfigValue(rawConfig.urqlImportFrom, '@urql/vue'),
     });
 
@@ -71,6 +73,13 @@ export class UrqlVisitor extends ClientSideBaseVisitor<VueUrqlRawPluginConfig, U
     return [...baseImports, ...imports];
   }
 
+  private _getOperationName(node: OperationDefinitionNode, operationType: string) {
+    return this.convertName(node.name?.value ?? '', {
+      suffix: this.config.omitOperationSuffix ? '' : pascalCase(operationType),
+      useTypesPrefix: false,
+    });
+  }
+
   private _buildCompositionFn(
     node: OperationDefinitionNode,
     operationType: string,
@@ -78,10 +87,7 @@ export class UrqlVisitor extends ClientSideBaseVisitor<VueUrqlRawPluginConfig, U
     operationResultType: string,
     operationVariablesTypes: string,
   ): string {
-    const operationName: string = this.convertName(node.name?.value ?? '', {
-      suffix: this.config.omitOperationSuffix ? '' : pascalCase(operationType),
-      useTypesPrefix: false,
-    });
+    const operationName: string = this._getOperationName(node, operationType);
 
     if (operationType === 'Mutation') {
       return `
@@ -100,6 +106,35 @@ export function use${operationName}<R = ${operationResultType}>(options: Omit<Ur
     return `
 export function use${operationName}(options: Omit<Urql.Use${operationType}Args<never, ${operationVariablesTypes}>, 'query'>) {
   return Urql.use${operationType}<${operationResultType}, ${operationVariablesTypes}>({ query: ${documentVariableName}, ...options });
+};`;
+  }
+
+  private _buildAsyncCompositionFn(
+    node: OperationDefinitionNode,
+    operationType: string,
+    documentVariableName: string,
+    operationResultType: string,
+    operationVariablesTypes: string,
+  ): string {
+    const operationName: string = this._getOperationName(node, operationType);
+
+    if (operationType === 'Mutation') {
+      return `
+export async function useAsync${operationName}(client: Urql.ClientHandle) {
+  return await clientHandle.use${operationType}<${operationResultType}, ${operationVariablesTypes}>(${documentVariableName});
+};`;
+    }
+
+    if (operationType === 'Subscription') {
+      return `
+export async function useAsync${operationName}<R = ${operationResultType}>(options: Omit<Urql.Use${operationType}Args<never, ${operationVariablesTypes}>, 'query'> = {}, client: Urql.ClientHandle, handler?: Urql.SubscriptionHandlerArg<${operationResultType}, R>) {
+  return await clientHandle.use${operationType}<${operationResultType}, R, ${operationVariablesTypes}>({ query: ${documentVariableName}, ...options }, handler);
+};`;
+    }
+
+    return `
+export async function useAsync${operationName}(options: Omit<Urql.Use${operationType}Args<never, ${operationVariablesTypes}>, 'query'>, client: Urql.ClientHandle) {
+  return await clientHandle.use${operationType}<${operationResultType}, ${operationVariablesTypes}>({ query: ${documentVariableName}, ...options });
 };`;
   }
 
@@ -124,6 +159,16 @@ export function use${operationName}(options: Omit<Urql.Use${operationType}Args<n
         )
       : null;
 
-    return [composition].filter(a => a).join('\n');
+    const asyncComposition = this.config.withAsyncComposition
+      ? this._buildAsyncCompositionFn(
+          node,
+          operationType,
+          documentVariablePrefixed,
+          operationResultTypePrefixed,
+          operationVariablesTypesPrefixed,
+        )
+      : null;
+
+    return [composition, asyncComposition].filter(a => a).join('\n');
   }
 }
